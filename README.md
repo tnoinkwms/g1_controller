@@ -36,8 +36,12 @@ pip install -e .
 ```python
 from g1_controller import G1ArmController
 
-arm.start()
 arm = G1ArmController()
-arm.set_axes({22:90, 15:90, 25:60, 18:60, 28:-30}, 3.0)
-arm.set_all_axes_to_zero(2.0)
+arm.start()
+
+arm.set_axes({22: 90, 15: 90}, duration=3.0)
+arm.set_all_axes_to_zero(duration=2.0, release_arm_sdk=False, release_duration=1.0)
+
+arm.set_axes({22: 90, 15: 90}, duration=3.0)
+arm.set_all_axes_to_zero(duration=2.0, release_arm_sdk=True, release_duration=1.0)
 arm.stop()
