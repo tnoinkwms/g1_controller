@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -23,7 +24,6 @@ class JointCalibration:
         return self.scale * user_deg + self.offset_deg
 
     def motor_to_user_deg(self, motor_deg: float) -> float:
-        # Avoid division by zero even if misconfigured.
         if self.scale == 0:
             raise ValueError("JointCalibration.scale must not be 0")
         return (motor_deg - self.offset_deg) / self.scale
@@ -34,13 +34,18 @@ class Gains:
     kp: float = 60.0
     kd: float = 1.5
 
+
 @dataclass
 class ControllerConfig:
     network_interface: str = "eth0"
     dt: float = 0.02
-    min_duration: float = 1.0
-    gains: Gains = field(default_factory=Gains)  # ← ここが重要
+    min_duration: float = 1.0  # safety: minimum interpolation duration
+
+    # NOTE: dataclassでは default_factory が必要
+    gains: Gains = field(default_factory=Gains)
+
     verbose: bool = True
+
+    # Unitree examples: motor_cmd[29].q = 1 enable, 0 disable (Weight / NotUsedJoint)
     enable_axis: Optional[int] = 29
     enable_q: float = 1.0
-

@@ -1,17 +1,48 @@
 from g1_controller import G1ArmController, ControllerConfig, Gains
 
-if __name__ == "__main__":
-    cfg = ControllerConfig(
-        network_interface="eth0",
-        dt=0.02,
-        gains=Gains(kp=60.0, kd=1.5),
-        verbose=True,
-    )
+cfg = ControllerConfig(
+    network_interface="eth0", 
+    dt=0.02,
+    min_duration=1.0, 
+    gains=Gains(kp=10.0, kd=0.5), #kp: 硬さ(比例ゲイン)、kd: ダンピング(微分ゲイン)
+    verbose=True, #関節の初期値を表示
+    enable_axis=29,   
+    enable_q=1.0,    
+)
 
-    arm = G1ArmController()
-    arm.start(wait=True)
+"""
+# ==== WAIST ====
+#12 WAIST_YAW   : +左回り / -右回り                range[-90, +90]    normal=0
+#13 WAIST_ROLL  : +左曲げ / -右曲げ(ロボット視点)    range[-20, +20]    normal=0
+#14 WAIST_PITCH : +お辞儀 / -反り返り(危ない)        range[0, +30]      normal=0
 
-    arm.set_axes({22:90, 15:90, 25:60, 18:60, 28:-30, 21:-30, 27:0, 20:0, 16:-20, 23:-20, 26:-50, 19:-50}, 3.0)
+# ==== LEFT ARM ====
+#15 L_SHOULDER_PITCH : +前 / -後ろ                  range[-120, +120]  normal=0
+#16 L_SHOULDER_ROLL  : +脇上げ / -脇閉め            range[-30, +110]   normal=0
+#17 L_SHOULDER_YAW   : +外回り / -内回り            range[-90, +90]    normal=0
+#18 L_ELBOW          : +前方曲げ / -背面曲げ        range[-10, +120]   normal=0
+#19 L_WRIST_ROLL     : +外側 / -内側                range[-90, +90]    normal=0
+#20 L_WRIST_SIDE(BEND): +前方曲げ / -背面曲げ       range[-90, +90]    normal=0
+#21 L_WRIST_YAW      : +外側曲げ / -内側曲げ        range[-90, +90]    normal=0
 
-    arm.set_all_axes_to_zero(duration=2.0)
-    arm.stop()
+# ==== RIGHT ARM ====
+#22 R_SHOULDER_PITCH : +前 / -後ろ                  range[-120, +120]  normal=0
+#23 R_SHOULDER_ROLL  : +脇上げ / -脇閉め            range[-30, +110]   normal=0
+#24 R_SHOULDER_YAW   : +外回り / -内回り            range[-90, +90]    normal=0
+#25 R_ELBOW          : +前方曲げ / -背面曲げ        range[-10, +120]   normal=0
+#26 R_WRIST_ROLL     : +外側 / -内側                range[-90, +90]    normal=0
+#27 R_WRIST_SIDE(BEND): +前方曲げ / -背面曲げ       range[-90, +90]    normal=0
+#28 R_WRIST_YAW      : +外側曲げ / -内側曲げ        range[-90, +90]    normal=0
+
+"""
+
+
+arm = G1ArmController()
+arm.start()
+
+arm.set_axes({22: 90, 15: 90}, duration=3.0)
+arm.set_all_axes_to_zero(duration=2.0, release_arm_sdk=False, release_duration=1.0)
+
+arm.set_axes({22: 90, 15: 90}, duration=3.0)
+arm.set_all_axes_to_zero(duration=2.0, release_arm_sdk=True, release_duration=1.0)
+arm.stop()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import threading
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict
 
 import numpy as np
 from unitree_sdk2py.core.channel import (
@@ -19,6 +19,7 @@ from unitree_sdk2py.utils.thread import RecurrentThread
 from .limits import LIMITS
 from .kinematics import user_deg_to_motor_rad, motor_rad_to_user_deg
 from .types import ControllerConfig
+from .poses import default_home_pose_motor_rad
 
 
 @dataclass
@@ -32,11 +33,11 @@ class _Interpolation:
 class G1ArmController:
     def __init__(
         self,
-        config: ControllerConfig = ControllerConfig(),
+        config: Optional[ControllerConfig] = None,
         on_state: Optional[Callable[[LowState_], None]] = None,
     ) -> None:
-        self.config = config
-        self.dt = float(config.dt)
+        self.config = config if config is not None else ControllerConfig()
+        self.dt = float(self.config.dt)
         self.crc = CRC()
 
         self._lock = threading.RLock()
@@ -44,11 +45,14 @@ class G1ArmController:
         self.low_state: Optional[LowState_] = None
         self.initialized = False
 
-        # Motor-space targets (radians)
+        # Motor-space targets (radians) for joints
         self.targets: dict[int, float] = {}
         self.interpolations: dict[int, _Interpolation] = {}
 
-        # Optional callback for external user
+        # arm_sdk enable scalar (motor_cmd[enable_axis].q)
+        self._arm_sdk_q: float = float(self.config.enable_q)
+        self._arm_sdk_interp: Optional[_Interpolation] = None
+
         self._on_state = on_state
 
         ChannelFactoryInitialize(0, self.config.network_interface)
@@ -76,13 +80,14 @@ class G1ArmController:
             while not self.initialized:
                 time.sleep(0.1)
 
-        self.thread.Start()
+        # start with arm_sdk enabled by default
+        self.enable_arm_sdk()
 
+        self.thread.Start()
         if self.config.verbose:
             print("Control loop started.")
 
     def stop(self) -> None:
-        # Best-effort stop (depends on unitree RecurrentThread implementation)
         if hasattr(self.thread, "Stop"):
             try:
                 self.thread.Stop()
@@ -99,62 +104,83 @@ class G1ArmController:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
+    # ---------- arm_sdk enable/disable ----------
+
+    def enable_arm_sdk(self) -> None:
+        """Immediately enable arm_sdk (motor_cmd[enable_axis].q = 1)."""
+        with self._lock:
+            self._arm_sdk_interp = None
+            self._arm_sdk_q = float(self.config.enable_q)
+
+    def disable_arm_sdk(self, duration: float = 1.0, blocking: bool = True) -> None:
+        """
+        Smoothly release arm_sdk (motor_cmd[enable_axis].q: 1 -> 0).
+        Similar to Unitree example Stage4.
+        """
+        if self.config.enable_axis is None:
+            return
+
+        with self._lock:
+            start = float(self._arm_sdk_q)
+            self._arm_sdk_interp = _Interpolation(
+                start_val=start,
+                end_val=0.0,
+                start_time=time.time(),
+                duration=max(float(duration), 0.1),
+            )
+
+        if blocking:
+            time.sleep(float(duration) + 0.1)
+
     # ---------- state ----------
 
     def _low_state_handler(self, msg: LowState_) -> None:
         with self._lock:
             self.low_state = msg
+
             if self._on_state is not None:
                 try:
                     self._on_state(msg)
                 except Exception:
-                    # Don't crash DDS callback.
                     pass
 
             if not self.initialized:
-                # Initialize targets from current motor positions.
                 for axis in LIMITS.keys():
                     try:
                         q = float(msg.motor_state[axis].q)
                     except Exception:
-                        # If firmware/IDL differs, fail fast with a clear message.
                         raise RuntimeError(f"Failed to read motor_state[{axis}].q from LowState_")
 
                     self.targets[axis] = q
+
                     if self.config.verbose:
                         user_deg = motor_rad_to_user_deg(axis, q)
                         motor_deg = float(np.rad2deg(q))
-                        print(
-                            f"Axis {axis} initial motor={motor_deg:.2f} deg, user={user_deg:.2f} deg"
-                        )
+                        print(f"Axis {axis} initial motor={motor_deg:.2f} deg, user={user_deg:.2f} deg")
 
                 self.initialized = True
 
-    # ---------- motion API ----------
+    # ---------- motion API (user degrees) ----------
 
     def set_axes(self, axes_deg: dict[int, float], duration: float, blocking: bool = True) -> None:
-        """
-        Schedule multiple axes in user-degrees.
-        If blocking=True, waits until duration elapses (like your original code).
-        """
+        # Any commanded motion should ensure arm_sdk is enabled
+        self.enable_arm_sdk()
+
         for axis_num, deg_value in axes_deg.items():
             self.set_axis(axis_num, deg_value, duration)
 
         if blocking:
-            time.sleep(float(duration) + 0.1)  # prevent overwrite, same intent as original
+            time.sleep(float(duration) + 0.1)
 
     def set_axis(self, axis_num: int, deg_value: float, duration: float) -> None:
-        """
-        Schedule one axis in user-degrees.
-        Internally converted to motor radians with your original sign/offset rules.
-        """
         if axis_num not in LIMITS:
             raise ValueError(f"Axis {axis_num} is not defined in limits.")
 
+        # Any commanded motion should ensure arm_sdk is enabled
+        self.enable_arm_sdk()
+
         with self._lock:
             if axis_num not in self.targets:
-                # If called before initialization, we still allow scheduling by assuming start=0.
-                # But it’s usually better to call start(wait=True) first.
                 self.targets.setdefault(axis_num, 0.0)
 
             motor_rad = user_deg_to_motor_rad(axis_num, float(deg_value))
@@ -172,39 +198,48 @@ class G1ArmController:
                 duration=max(float(duration), float(self.config.min_duration)),
             )
 
-    def set_all_axes_to_zero(self, duration: float, blocking: bool = True) -> None:
-        """Equivalent to your set_all_axes_to_zero(): command 0deg for all limited joints."""
-        for axis in LIMITS.keys():
-            self.set_axis(axis, 0.0, duration)
-        if blocking:
-            time.sleep(float(duration) + 0.1)
-
-    # ---------- control loop ----------
+    def set_all_axes_to_zero(
+        self,
+        duration: float,
+        blocking: bool = True,
+        release_arm_sdk: bool = True,
+        release_duration: float = 1.0,
+        pose_motor_rad: Optional[Dict[int, float]] = None,
+    ) -> None:
+        pose = pose_motor_rad if pose_motor_rad is not None else default_home_pose_motor_rad()
+        self.set_axes_motor(pose, duration=duration, blocking=blocking)
+        if release_arm_sdk:
+            self.disable_arm_sdk(duration=release_duration, blocking=blocking)
 
     def _control_step(self) -> None:
         now = time.time()
 
-        # Keep your original "enable" behavior
-        if self.config.enable_axis is not None:
-            try:
-                self.low_cmd.motor_cmd[self.config.enable_axis].q = float(self.config.enable_q)
-            except Exception:
-                # If enable axis doesn't exist in this firmware, ignore.
-                pass
-
         with self._lock:
+            # Update arm_sdk enable scalar interpolation and write it
+            if self.config.enable_axis is not None:
+                if self._arm_sdk_interp is not None:
+                    interp = self._arm_sdk_interp
+                    elapsed = now - interp.start_time
+                    ratio = float(np.clip(elapsed / interp.duration, 0.0, 1.0))
+                    self._arm_sdk_q = interp.start_val + (interp.end_val - interp.start_val) * ratio
+                    if ratio >= 1.0:
+                        self._arm_sdk_interp = None
+
+                try:
+                    self.low_cmd.motor_cmd[self.config.enable_axis].q = float(self._arm_sdk_q)
+                except Exception:
+                    pass
+
+            # Joint interpolation + command write
             for axis in LIMITS.keys():
-                # interpolation update
                 if axis in self.interpolations:
                     interp = self.interpolations[axis]
                     elapsed = now - interp.start_time
                     ratio = float(np.clip(elapsed / interp.duration, 0.0, 1.0))
                     self.targets[axis] = interp.start_val + (interp.end_val - interp.start_val) * ratio
-
                     if ratio >= 1.0:
                         del self.interpolations[axis]
 
-                # write motor command
                 cmd = self.low_cmd.motor_cmd[axis]
                 cmd.q = float(self.targets[axis])
                 cmd.dq = 0.0
